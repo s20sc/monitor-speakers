@@ -83,4 +83,30 @@ struct RouterConfig: Codable {
         }
         return matrix
     }
+
+    /// Validates the L/C/R pair mapping so we never route to nonexistent output
+    /// channels. Pass the aggregate's output channel count for the upper-bound
+    /// check, or 0 to skip it (e.g. before the aggregate exists).
+    func validateMapping(outputChannels: Int) throws {
+        for (name, start) in [("left", leftPair), ("center", centerPair), ("right", rightPair)] {
+            // Channels 0-1 are BlackHole's own pair, reserved and kept silent.
+            guard start >= 2 else {
+                throw AudioDeviceError.unsupported(
+                    "\(name) pair start \(start) is invalid (channels 0-1 are reserved for BlackHole)"
+                )
+            }
+            if outputChannels > 0, start + 1 >= outputChannels {
+                throw AudioDeviceError.unsupported(
+                    "\(name) pair \(start)-\(start + 1) exceeds aggregate output channels "
+                    + "(\(outputChannels)); run `setup` and `test`/`map` again"
+                )
+            }
+        }
+        let starts = [leftPair, centerPair, rightPair]
+        if Set(starts).count != starts.count {
+            throw AudioDeviceError.unsupported(
+                "left/center/right pairs must be distinct (got \(starts))"
+            )
+        }
+    }
 }
