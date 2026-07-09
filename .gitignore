@@ -1,0 +1,9 @@
+# build artifacts
+bin/
+.build/
+
+# claude session logs (may contain local paths)
+.claude/
+
+# macOS
+.DS_Store
