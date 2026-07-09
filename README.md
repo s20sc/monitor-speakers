@@ -1,5 +1,9 @@
 # monitor-speakers
 
+<p align="center">
+  <img src="pics/banner.jpg" alt="monitor-speakers — three monitor speakers as one wide stereo field" width="100%">
+</p>
+
 A free replacement for Rogue Amoeba Loopback for one specific job: routing
 system audio across three monitor speakers as a single wide stereo field.
 
