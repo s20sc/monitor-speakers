@@ -4,6 +4,8 @@
   <img src="pics/banner.jpg" alt="monitor-speakers — three monitor speakers as one wide stereo field" width="100%">
 </p>
 
+<p align="center"><b>English</b> | <a href="README.zh-CN.md">中文</a></p>
+
 A free replacement for Rogue Amoeba Loopback for one specific job: routing
 system audio across three monitor speakers as a single wide stereo field.
 
@@ -76,3 +78,7 @@ bin/monitor-speakers teardown         # destroy the aggregate device
   (AirPods, etc.) is respected until the next connect/disconnect event.
 - **Switching back**: `bin/monitor-speakers default "<your speakers>"` returns
   the system to any other output device; the router can stay running idle.
+
+## License
+
+[MIT](LICENSE)
