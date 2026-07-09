@@ -24,6 +24,20 @@ single IOProc that copies the BlackHole loopback input to the monitor output
 channels through a fixed mixing matrix. Latency is one IO buffer
 (256 frames ≈ 5 ms at 48 kHz).
 
+## Why
+
+I already had three monitors fanned across the desk, each with a decent pair of
+speakers sitting there unused. Instead of buying a dedicated set of desk speakers,
+I wondered: why not put the ones I already own to work — all three at once?
+
+Spreading the stereo image across three physically separated panels turns the whole
+desk into a soundstage. The left monitor carries the left channel, the right monitor
+the right, and the center fills the middle. Because the sources are a meter or two
+apart instead of crammed into one enclosure, the result is noticeably wider and more
+enveloping than a single monitor or a small pair of near-fields — and it costs nothing
+beyond hardware that was already on the desk. (Loopback, the usual tool for this kind
+of routing, is paid software; this is about a hundred lines of Swift.)
+
 ## Requirements
 
 - [BlackHole 2ch](https://existential.audio/blackhole/) (free virtual audio driver)
