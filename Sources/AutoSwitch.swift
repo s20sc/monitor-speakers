@@ -14,27 +14,47 @@ final class AutoSwitcher {
     private let queue = DispatchQueue(label: "monitor-speakers.autoswitch")
     private var pending: DispatchWorkItem?
     private var monitorsWerePresent: Bool?
+    private var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    /// Retained so it can be handed back to AudioObjectRemovePropertyListenerBlock.
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
 
     init(config: RouterConfig) {
         self.config = config
     }
 
+    deinit {
+        stop()
+    }
+
     func start() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, queue
-        ) { [weak self] _, _ in
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.scheduleEvaluation()
         }
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, queue, block
+        )
         if status != noErr {
             print("auto-switch: failed to add device listener (OSStatus \(status))")
             return
         }
+        listenerBlock = block
         queue.async { [weak self] in self?.evaluate() }
+    }
+
+    /// Removes the device listener and cancels any debounced evaluation.
+    func stop() {
+        if let block = listenerBlock {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &address, queue, block
+            )
+            listenerBlock = nil
+        }
+        pending?.cancel()
+        pending = nil
     }
 
     private func scheduleEvaluation() {

@@ -73,27 +73,35 @@ func commandSetup() {
     // BlackHole is the clock master: its host-clock timing is the most stable,
     // and every monitor gets drift compensation against it.
     let subDeviceUIDs = [blackhole.uid] + monitors.map { $0.uid }
+    let aggregateID: AudioDeviceID
     do {
-        let aggregateID = try AudioDevices.createAggregate(
+        aggregateID = try AudioDevices.createAggregate(
             name: config.aggregateName,
             uid: config.aggregateUID,
             subDeviceUIDs: subDeviceUIDs,
             masterUID: blackhole.uid
         )
-        try config.save()
-        print("created aggregate '\(config.aggregateName)' (id \(aggregateID))")
-        print("\nchannel layout:")
-        print("  ch 0-1  \(blackhole.name) [loopback input, output muted]")
-        var channel = 2
-        for monitor in monitors {
-            print("  ch \(channel)-\(channel + 1)  \(monitor.name) [\(monitor.transport)]")
-            channel += 2
-        }
-        print("\nnext: run `monitor-speakers test` to identify monitors,")
-        print("then `monitor-speakers map <left> <center> <right>` if the default (2 4 6) is wrong.")
     } catch {
         fail("\(error)")
     }
+    // Roll back the just-created aggregate if any follow-up step fails, so setup
+    // never leaves an orphan device behind after reporting failure.
+    do {
+        try config.save()
+    } catch {
+        try? AudioDevices.destroyAggregate(deviceID: aggregateID)
+        fail("failed to save config after creating aggregate (rolled back): \(error)")
+    }
+    print("created aggregate '\(config.aggregateName)' (id \(aggregateID))")
+    print("\nchannel layout:")
+    print("  ch 0-1  \(blackhole.name) [loopback input, output muted]")
+    var channel = 2
+    for monitor in monitors {
+        print("  ch \(channel)-\(channel + 1)  \(monitor.name) [\(monitor.transport)]")
+        channel += 2
+    }
+    print("\nnext: run `monitor-speakers test` to identify monitors,")
+    print("then `monitor-speakers map <left> <center> <right>` if the default (2 4 6) is wrong.")
 }
 
 func commandTeardown() {
@@ -123,7 +131,9 @@ func commandTest(pairArg: String?) {
     }
     for pair in pairs {
         print("playing tone on channel pair \(pair)-\(pair + 1) ...")
-        let tone = TonePlayer(deviceID: aggregate.id, pairStart: pair)
+        let tone = TonePlayer(
+            deviceID: aggregate.id, pairStart: pair, channelCount: aggregate.outputChannels
+        )
         do {
             try tone.start()
         } catch {
@@ -147,6 +157,7 @@ func commandMap(_ args: [String]) {
     config.centerPair = center
     config.rightPair = right
     do {
+        try config.validateMapping(outputChannels: findAggregate(config)?.outputChannels ?? 0)
         try config.save()
         print("mapping saved: left=\(left) center=\(center) right=\(right)")
     } catch {
@@ -196,18 +207,26 @@ func commandAutoSwitch(_ arg: String?) {
     }
 }
 
-// Held globally so the listener survives for the whole `run` lifetime.
+// Held globally so they survive for the whole `run` lifetime and can be torn
+// down cleanly on shutdown.
 var autoSwitcher: AutoSwitcher?
+var verboseTimer: DispatchSourceTimer?
 
 func commandRun(verbose: Bool) {
     let config = RouterConfig.load()
     guard let aggregate = findAggregate(config) else {
         fail("aggregate not found — run `monitor-speakers setup` first")
     }
+    do {
+        try config.validateMapping(outputChannels: aggregate.outputChannels)
+    } catch {
+        fail("\(error)")
+    }
     let router = Router(
         deviceID: aggregate.id,
         matrix: config.mixingMatrix(),
-        gain: config.masterGain
+        gain: config.masterGain,
+        channelCount: aggregate.outputChannels
     )
     do {
         try router.start()
@@ -231,7 +250,7 @@ func commandRun(verbose: Bool) {
             print(String(format: "input peak: %.4f", router.inputPeak))
         }
         timer.resume()
-        _ = Unmanaged.passRetained(timer as AnyObject)
+        verboseTimer = timer
     }
 
     signal(SIGINT, SIG_IGN)
@@ -239,6 +258,8 @@ func commandRun(verbose: Bool) {
     let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
     let shutdown = {
+        verboseTimer?.cancel()
+        autoSwitcher?.stop()
         router.stop()
         print("stopped")
         exit(0)
@@ -277,8 +298,8 @@ func commandStatus() {
     let monitors = AudioDevices.find(nameContains: config.monitorNameFilter)
         .filter { $0.outputChannels >= 2 && $0.transport != "Aggregate" }
     print("monitors matching '\(config.monitorNameFilter)': \(monitors.count)")
-    let defaultID = AudioDevices.defaultOutputDevice()
-    if let current = AudioDevices.all().first(where: { $0.id == defaultID }) {
+    if let defaultID = AudioDevices.defaultOutputDevice(),
+       let current = AudioDevices.all().first(where: { $0.id == defaultID }) {
         print("system default output: \(current.name)")
     }
 }

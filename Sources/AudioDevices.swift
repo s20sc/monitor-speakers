@@ -14,6 +14,7 @@ struct AudioDeviceInfo {
 enum AudioDeviceError: Error, CustomStringConvertible {
     case osStatus(String, OSStatus)
     case notFound(String)
+    case unsupported(String)
 
     var description: String {
         switch self {
@@ -21,6 +22,8 @@ enum AudioDeviceError: Error, CustomStringConvertible {
             return "\(what) failed (OSStatus \(status))"
         case .notFound(let what):
             return "\(what) not found"
+        case .unsupported(let what):
+            return what
         }
     }
 }
@@ -157,13 +160,16 @@ enum AudioDevices {
         }
     }
 
-    static func defaultOutputDevice() -> AudioDeviceID {
+    /// Returns nil when the property read fails rather than a bogus device 0.
+    static func defaultOutputDevice() -> AudioDeviceID? {
         var addr = propertyAddress(kAudioHardwarePropertyDefaultOutputDevice)
         var deviceID = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        _ = AudioObjectGetPropertyData(
+        guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID
-        )
+        ) == noErr else {
+            return nil
+        }
         return deviceID
     }
 
@@ -180,11 +186,61 @@ enum AudioDevices {
     }
 
     /// Smaller IO buffers mean lower latency; 256 frames ≈ 5.3 ms at 48 kHz.
-    static func setBufferFrameSize(_ deviceID: AudioDeviceID, frames: UInt32) {
+    static func setBufferFrameSize(_ deviceID: AudioDeviceID, frames: UInt32) throws {
         var addr = propertyAddress(kAudioDevicePropertyBufferFrameSize)
         var value = frames
-        _ = AudioObjectSetPropertyData(
+        let status = AudioObjectSetPropertyData(
             deviceID, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value
         )
+        guard status == noErr else {
+            throw AudioDeviceError.osStatus("setBufferFrameSize", status)
+        }
+    }
+
+    /// Nominal sample rate of a device, or nil if it can't be read.
+    static func nominalSampleRate(_ deviceID: AudioDeviceID) -> Double? {
+        var addr = propertyAddress(kAudioDevicePropertyNominalSampleRate)
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &rate) == noErr,
+              rate > 0
+        else {
+            return nil
+        }
+        return rate
+    }
+
+    /// Verifies the first stream in `scope` is 32-bit float interleaved PCM, the
+    /// format the router's buffer math assumes. Throws otherwise; no-ops when the
+    /// scope has no streams.
+    static func requireFloat32(_ deviceID: AudioDeviceID, scope: AudioObjectPropertyScope) throws {
+        var streamsAddr = propertyAddress(kAudioDevicePropertyStreams, scope: scope)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &streamsAddr, 0, nil, &size) == noErr,
+              size > 0
+        else {
+            return
+        }
+        let count = Int(size) / MemoryLayout<AudioStreamID>.size
+        var streams = [AudioStreamID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(deviceID, &streamsAddr, 0, nil, &size, &streams) == noErr,
+              let stream = streams.first
+        else {
+            return
+        }
+        var formatAddr = propertyAddress(kAudioStreamPropertyVirtualFormat)
+        var asbd = AudioStreamBasicDescription()
+        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        guard AudioObjectGetPropertyData(stream, &formatAddr, 0, nil, &formatSize, &asbd) == noErr
+        else {
+            return
+        }
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        guard asbd.mFormatID == kAudioFormatLinearPCM, isFloat, asbd.mBitsPerChannel == 32 else {
+            throw AudioDeviceError.unsupported(
+                "aggregate stream is not 32-bit float PCM (got \(asbd.mBitsPerChannel)-bit); "
+                + "the router only supports 32-bit float"
+            )
+        }
     }
 }
