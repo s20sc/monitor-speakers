@@ -163,6 +163,124 @@ final class Router {
     }
 }
 
+// MARK: - Supervision
+
+/// Owns the Router and keeps it alive across dock events. When the monitors
+/// unplug, the aggregate collapses and the HAL tears down its IO; nothing
+/// restarts it on reconnect, which would leave a silent pipeline. The
+/// supervisor watches the device list and rebuilds the IOProc whenever the
+/// aggregate's output channel count or AudioDeviceID changes (the latter also
+/// covers coreaudiod restarts, which renumber every device).
+final class RouterSupervisor {
+    private let config: RouterConfig
+    private let queue = DispatchQueue(label: "monitor-speakers.supervisor")
+    private var router: Router?
+    private var pending: DispatchWorkItem?
+    private var lastOutputChannels = -1
+    private var lastDeviceID = AudioDeviceID(0)
+    private var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    /// Retained so it can be handed back to AudioObjectRemovePropertyListenerBlock.
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+
+    var inputPeak: Float { router?.inputPeak ?? 0 }
+
+    init(config: RouterConfig) {
+        self.config = config
+    }
+
+    deinit {
+        stop()
+    }
+
+    /// Attempts the first start and begins watching. A failed first start is
+    /// not fatal: with the laptop undocked the aggregate has no monitor
+    /// channels yet, so we wait for a device-list change instead of letting
+    /// launchd respawn the daemon in a crash loop.
+    func start() {
+        do {
+            try startRouter()
+        } catch {
+            lastOutputChannels = -1
+            lastDeviceID = 0
+            print("supervisor: IO not started yet (\(error)); waiting for device changes")
+        }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleReload()
+        }
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, queue, block
+        )
+        if status != noErr {
+            print("supervisor: failed to add device listener (OSStatus \(status)); IO will not self-heal")
+            return
+        }
+        listenerBlock = block
+    }
+
+    /// Removes the device listener, cancels pending reloads, and stops IO.
+    func stop() {
+        if let block = listenerBlock {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &address, queue, block
+            )
+            listenerBlock = nil
+        }
+        pending?.cancel()
+        pending = nil
+        router?.stop()
+        router = nil
+    }
+
+    private func startRouter() throws {
+        guard let aggregate = AudioDevices.find(uid: config.aggregateUID) else {
+            throw AudioDeviceError.notFound("aggregate device \(config.aggregateUID)")
+        }
+        try config.validateMapping(outputChannels: aggregate.outputChannels)
+        let started = Router(
+            deviceID: aggregate.id,
+            matrix: config.mixingMatrix(),
+            gain: config.masterGain,
+            channelCount: aggregate.outputChannels
+        )
+        try started.start()
+        router = started
+        lastOutputChannels = aggregate.outputChannels
+        lastDeviceID = aggregate.id
+        let centerMode = config.centerStereo ? "stereo" : "mono"
+        print("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair), gain \(config.masterGain)")
+    }
+
+    private func scheduleReload() {
+        pending?.cancel()
+        // Debounce past AutoSwitcher's 2 s window: dock devices surface one at
+        // a time and we want the final topology, not an intermediate one.
+        let work = DispatchWorkItem { [weak self] in self?.reloadIfNeeded() }
+        pending = work
+        queue.asyncAfter(deadline: .now() + 2.5, execute: work)
+    }
+
+    private func reloadIfNeeded() {
+        guard let aggregate = AudioDevices.find(uid: config.aggregateUID) else { return }
+        guard aggregate.outputChannels != lastOutputChannels || aggregate.id != lastDeviceID
+        else { return }
+        print("supervisor: aggregate changed (\(lastOutputChannels)ch id \(lastDeviceID) → \(aggregate.outputChannels)ch id \(aggregate.id)), restarting IO")
+        router?.stop()
+        router = nil
+        do {
+            try startRouter()
+        } catch {
+            // Reset so the next device-list event retries unconditionally.
+            lastOutputChannels = -1
+            lastDeviceID = 0
+            print("supervisor: restart failed: \(error) — will retry on next device change")
+        }
+    }
+}
+
 // MARK: - Diagnostic tone
 
 /// State for the tone IOProc. `phase` is touched only by the audio thread.

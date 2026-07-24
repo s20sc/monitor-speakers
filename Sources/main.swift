@@ -208,33 +208,24 @@ func commandAutoSwitch(_ arg: String?) {
 }
 
 // Held globally so they survive for the whole `run` lifetime and can be torn
-// down cleanly on shutdown.
+// down cleanly on shutdown. Locals in commandRun are not enough: ARC may
+// release them after their last use even though dispatchMain() never returns.
 var autoSwitcher: AutoSwitcher?
+var routerSupervisor: RouterSupervisor?
 var verboseTimer: DispatchSourceTimer?
+var signalSources: [DispatchSourceSignal] = []
 
 func commandRun(verbose: Bool) {
     let config = RouterConfig.load()
-    guard let aggregate = findAggregate(config) else {
+    guard findAggregate(config) != nil else {
         fail("aggregate not found — run `monitor-speakers setup` first")
     }
-    do {
-        try config.validateMapping(outputChannels: aggregate.outputChannels)
-    } catch {
-        fail("\(error)")
-    }
-    let router = Router(
-        deviceID: aggregate.id,
-        matrix: config.mixingMatrix(),
-        gain: config.masterGain,
-        channelCount: aggregate.outputChannels
-    )
-    do {
-        try router.start()
-    } catch {
-        fail("\(error)")
-    }
-    let centerMode = config.centerStereo ? "stereo" : "mono"
-    print("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair), gain \(config.masterGain)")
+    // The supervisor validates the mapping, starts the router, and rebuilds
+    // the IOProc whenever the aggregate changes across dock events. A failed
+    // first start (laptop undocked) waits instead of crash-looping.
+    let supervisor = RouterSupervisor(config: config)
+    supervisor.start()
+    routerSupervisor = supervisor
     print("set system output to '\(config.blackholeName)' to hear audio; Ctrl-C to stop.")
 
     if config.autoSwitch {
@@ -247,7 +238,7 @@ func commandRun(verbose: Bool) {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler {
-            print(String(format: "input peak: %.4f", router.inputPeak))
+            print(String(format: "input peak: %.4f", supervisor.inputPeak))
         }
         timer.resume()
         verboseTimer = timer
@@ -260,7 +251,7 @@ func commandRun(verbose: Bool) {
     let shutdown = {
         verboseTimer?.cancel()
         autoSwitcher?.stop()
-        router.stop()
+        routerSupervisor?.stop()
         print("stopped")
         exit(0)
     }
@@ -268,6 +259,7 @@ func commandRun(verbose: Bool) {
     sigterm.setEventHandler(handler: shutdown)
     sigint.resume()
     sigterm.resume()
+    signalSources = [sigint, sigterm]
     dispatchMain()
 }
 
