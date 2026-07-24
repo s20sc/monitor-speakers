@@ -82,6 +82,25 @@ bin/monitor-speakers teardown         # 销毁聚合设备
 - **切回**：`bin/monitor-speakers default "<你的扬声器>"` 把系统切回任意其他输出设备，
   router 可以继续挂着空跑。
 
+## 故障排查：重新插上扩展坞后没声音
+
+`run` 守护进程可以跨插拔自愈（聚集设备的声道数或设备 ID 变化时自动重建 IOProc）。
+如果依然没声，问题通常出在本程序之下的系统层。按顺序逐级排查，每一步之后看一眼
+`tail /tmp/monitor-speakers.log`：
+
+1. **重启守护进程**：`launchctl kickstart -k gui/$UID/com.monitor-speakers.router`
+2. **日志出现 `AudioDeviceStart failed (OSStatus 1937010544)`**——即
+   `'stop'` / `kAudioHardwareNotRunningError`：CoreAudio 完全无法在显示器上启动
+   IO。用直连测试验证（`bin/monitor-speakers default <显示器 UID 片段>` +
+   `afplay some.wav`）；如果直连也失败，说明卡死在系统层，与本程序无关：
+3. **重启 CoreAudio**：`sudo killall coreaudiod`
+4. **重插扩展坞/视频线**，或给显示器断电重启
+5. **重启 Mac**——清除内核显示音频驱动的卡死状态（特征：HDMI *和* DisplayPort
+   的显示器全部无声、内建扬声器却正常；这种状态用户态无法修复）
+
+诊断技巧：健康的守护进程在 `sample <pid> 1` 里能看到实时音频线程
+（`com.apple.audio.IOThread.client`）。
+
 ## 许可
 
 [MIT](LICENSE)

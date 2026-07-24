@@ -93,6 +93,28 @@ bin/monitor-speakers teardown         # destroy the aggregate device
 - **Switching back**: `bin/monitor-speakers default "<your speakers>"` returns
   the system to any other output device; the router can stay running idle.
 
+## Troubleshooting: no sound after re-docking
+
+The `run` daemon self-heals across dock cycles (it rebuilds its IOProc when
+the aggregate's channel count or device ID changes). If there is still no
+sound, the failure is usually below this program. Escalate in order, checking
+`tail /tmp/monitor-speakers.log` after each step:
+
+1. **Restart the daemon**: `launchctl kickstart -k gui/$UID/com.monitor-speakers.router`
+2. **`AudioDeviceStart failed (OSStatus 1937010544)`** in the log — that is
+   `'stop'` / `kAudioHardwareNotRunningError`: CoreAudio cannot start IO on
+   the monitors at all. Verify with a direct test
+   (`bin/monitor-speakers default <monitor UID fragment>` + `afplay some.wav`);
+   if even that fails, the wedge is system-level, not this program:
+3. **Restart CoreAudio**: `sudo killall coreaudiod`
+4. **Re-seat the dock / display cables**, or power-cycle the monitors
+5. **Reboot** — clears a wedged kernel display-audio driver (all monitors
+   dead on HDMI *and* DisplayPort while the built-in speakers still work is
+   the signature; nothing in user space fixes that)
+
+Diagnostic: a healthy daemon shows a realtime audio thread
+(`com.apple.audio.IOThread.client`) in `sample <pid> 1`.
+
 ## License
 
 [MIT](LICENSE)
