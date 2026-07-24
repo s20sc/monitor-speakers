@@ -14,7 +14,7 @@ USAGE:
   monitor-speakers center <stereo|mono>      Center monitor plays own L/R or mono (L+R)/2
   monitor-speakers autoswitch <on|off>       Auto-switch default output on monitor connect/disconnect
   monitor-speakers run [--verbose]           Start routing (foreground; Ctrl-C to stop)
-  monitor-speakers default <name fragment>   Set system default output device
+  monitor-speakers default <name|UID fragment>   Set system default output device
   monitor-speakers status                    Show config and device availability
   monitor-speakers install                   Install launchd agent (auto-start at login)
   monitor-speakers uninstall                 Remove launchd agent
@@ -264,8 +264,14 @@ func commandRun(verbose: Bool) {
 }
 
 func commandDefault(_ fragment: String?) {
-    guard let fragment else { fail("usage: monitor-speakers default <device name fragment>") }
-    let matches = AudioDevices.find(nameContains: fragment).filter { $0.outputChannels > 0 }
+    guard let fragment else { fail("usage: monitor-speakers default <device name or UID fragment>") }
+    // Matching the UID too lets identically-named devices (three "LG SDQHD")
+    // be addressed individually, e.g. for per-monitor diagnostics.
+    let matches = AudioDevices.all().filter {
+        $0.outputChannels > 0
+            && ($0.name.localizedCaseInsensitiveContains(fragment)
+                || $0.uid.localizedCaseInsensitiveContains(fragment))
+    }
     guard let device = matches.first else { fail("no output device matching '\(fragment)'") }
     if matches.count > 1 {
         print("multiple matches, using '\(device.name)' (\(device.transport))")
