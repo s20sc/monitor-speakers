@@ -88,6 +88,11 @@ bin/monitor-speakers teardown         # 销毁聚合设备
 如果依然没声，问题通常出在本程序之下的系统层。按顺序逐级排查，每一步之后看一眼
 `tail /tmp/monitor-speakers.log`：
 
+0. **换了工位 / 重新接线？** 先看 `bin/monitor-speakers status`：如果聚集设备的输出
+   声道数比预期少（比如显示 `4 out ch` 而不是 8），说明显示器的 CoreAudio UID 变了——
+   UID 里编码了端口位置，换个口插就是一台"新设备"，聚集设备会悄悄把它剔除。日志表现为
+   supervisor 反复重试并报 `pair exceeds aggregate output channels`。修法：`setup` →
+   `test` → `map`（位置调整过的话映射通常也要重新对一遍）。
 1. **重启守护进程**：`launchctl kickstart -k gui/$UID/com.monitor-speakers.router`
 2. **日志出现 `AudioDeviceStart failed (OSStatus 1937010544)`**——即
    `'stop'` / `kAudioHardwareNotRunningError`：CoreAudio 完全无法在显示器上启动

@@ -100,6 +100,13 @@ the aggregate's channel count or device ID changes). If there is still no
 sound, the failure is usually below this program. Escalate in order, checking
 `tail /tmp/monitor-speakers.log` after each step:
 
+0. **Moved desks / re-cabled?** Check `bin/monitor-speakers status`: if the
+   aggregate shows fewer output channels than expected (e.g. `4 out ch`
+   instead of 8), the monitors' CoreAudio UIDs changed — the UID encodes the
+   port, so plugging into a different port makes a monitor a *new* device
+   and the aggregate silently drops it. The log shows the supervisor retrying
+   with `pair exceeds aggregate output channels`. Fix: `setup` → `test` →
+   `map` (the mapping usually needs re-checking too since positions changed).
 1. **Restart the daemon**: `launchctl kickstart -k gui/$UID/com.monitor-speakers.router`
 2. **`AudioDeviceStart failed (OSStatus 1937010544)`** in the log — that is
    `'stop'` / `kAudioHardwareNotRunningError`: CoreAudio cannot start IO on
