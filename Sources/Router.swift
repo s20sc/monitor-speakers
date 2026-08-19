@@ -185,6 +185,9 @@ final class RouterSupervisor {
     )
     /// Retained so it can be handed back to AudioObjectRemovePropertyListenerBlock.
     private var listenerBlock: AudioObjectPropertyListenerBlock?
+    /// uid -> "name [transport]" of monitors seen at the last device-list
+    /// event; diffed on every event to log exactly which monitor flapped.
+    private var knownMonitors: [String: String] = [:]
 
     var inputPeak: Float { router?.inputPeak ?? 0 }
 
@@ -206,19 +209,42 @@ final class RouterSupervisor {
         } catch {
             lastOutputChannels = -1
             lastDeviceID = 0
-            print("supervisor: IO not started yet (\(error)); waiting for device changes")
+            log("supervisor: IO not started yet (\(error)); waiting for device changes")
         }
+        knownMonitors = Self.currentMonitors(config)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.logMonitorChanges()
             self?.scheduleReload()
         }
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, queue, block
         )
         if status != noErr {
-            print("supervisor: failed to add device listener (OSStatus \(status)); IO will not self-heal")
+            log("supervisor: failed to add device listener (OSStatus \(status)); IO will not self-heal")
             return
         }
         listenerBlock = block
+    }
+
+    /// Snapshot of physical monitors matching the config filter.
+    private static func currentMonitors(_ config: RouterConfig) -> [String: String] {
+        let monitors = AudioDevices.find(nameContains: config.monitorNameFilter)
+            .filter { $0.outputChannels >= 2 && $0.transport != "Aggregate" && $0.transport != "Virtual" }
+            .map { ($0.uid, "\($0.name) [\($0.transport)]") }
+        return Dictionary(monitors, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Runs undebounced on every device-list event so even brief flaps leave a
+    /// timestamped trace of exactly which monitor dropped and returned.
+    private func logMonitorChanges() {
+        let current = Self.currentMonitors(config)
+        for (uid, desc) in current where knownMonitors[uid] == nil {
+            log("monitor appeared: \(desc) uid \(uid)")
+        }
+        for (uid, desc) in knownMonitors where current[uid] == nil {
+            log("monitor LOST: \(desc) uid \(uid)")
+        }
+        knownMonitors = current
     }
 
     /// Removes the device listener, cancels pending reloads, and stops IO.
@@ -251,7 +277,7 @@ final class RouterSupervisor {
         lastOutputChannels = aggregate.outputChannels
         lastDeviceID = aggregate.id
         let centerMode = config.centerStereo ? "stereo" : "mono"
-        print("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair), gain \(config.masterGain)")
+        log("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair), gain \(config.masterGain)")
     }
 
     private func scheduleReload() {
@@ -267,7 +293,7 @@ final class RouterSupervisor {
         guard let aggregate = AudioDevices.find(uid: config.aggregateUID) else { return }
         guard aggregate.outputChannels != lastOutputChannels || aggregate.id != lastDeviceID
         else { return }
-        print("supervisor: aggregate changed (\(lastOutputChannels)ch id \(lastDeviceID) → \(aggregate.outputChannels)ch id \(aggregate.id)), restarting IO")
+        log("supervisor: aggregate changed (\(lastOutputChannels)ch id \(lastDeviceID) → \(aggregate.outputChannels)ch id \(aggregate.id)), restarting IO")
         router?.stop()
         router = nil
         do {
@@ -276,7 +302,7 @@ final class RouterSupervisor {
             // Reset so the next device-list event retries unconditionally.
             lastOutputChannels = -1
             lastDeviceID = 0
-            print("supervisor: restart failed: \(error) — will retry on next device change")
+            log("supervisor: restart failed: \(error) — will retry on next device change")
         }
     }
 }

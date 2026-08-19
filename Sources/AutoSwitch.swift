@@ -49,7 +49,7 @@ final class AutoSwitcher {
             AudioObjectID(kAudioObjectSystemObject), &address, queue, block
         )
         if status != noErr {
-            print("auto-switch: failed to add device listener (OSStatus \(status))")
+            log("auto-switch: failed to add device listener (OSStatus \(status))")
             return
         }
         listenerBlock = block
@@ -82,7 +82,7 @@ final class AutoSwitcher {
     /// with the output stranded on a silent device.
     private func scheduleRetry() {
         guard retriesLeft > 0 else {
-            print("auto-switch: no usable output device after retries; pick one manually")
+            log("auto-switch: no usable output device after retries; pick one manually")
             return
         }
         retriesLeft -= 1
@@ -136,19 +136,19 @@ final class AutoSwitcher {
     @discardableResult
     private func switchDefault(to device: AudioDeviceInfo?, reason: String) -> Bool {
         guard let device else {
-            print("auto-switch: \(reason), but no target device found yet (will retry)")
+            log("auto-switch: \(reason), but no target device found yet (will retry)")
             return false
         }
         if AudioDevices.defaultOutputDevice() == device.id {
-            print("auto-switch: \(reason), '\(device.name)' already default")
+            log("auto-switch: \(reason), '\(device.name)' already default")
             return true
         }
         do {
             try AudioDevices.setDefaultOutputDevice(device.id)
-            print("auto-switch: \(reason) → default output '\(device.name)'")
+            log("auto-switch: \(reason) → default output '\(device.name)'")
             return true
         } catch {
-            print("auto-switch: \(reason), switch failed: \(error)")
+            log("auto-switch: \(reason), switch failed: \(error)")
             return false
         }
     }
