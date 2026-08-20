@@ -22,11 +22,17 @@ struct RouterConfig: Codable {
     /// none present -> built-in speakers.
     var autoSwitch = true
     var requiredMonitors = 3
+    /// Per-position gain trims (0.0-2.0): identical-model monitors from
+    /// different production batches can differ audibly in midrange level.
+    var leftTrim: Float = 1.0
+    var centerTrim: Float = 1.0
+    var rightTrim: Float = 1.0
 
     enum CodingKeys: String, CodingKey {
         case aggregateName, aggregateUID, blackholeName, monitorNameFilter
         case masterGain, leftPair, centerPair, rightPair, centerStereo
         case autoSwitch, requiredMonitors
+        case leftTrim, centerTrim, rightTrim
     }
 
     init() {}
@@ -45,6 +51,9 @@ struct RouterConfig: Codable {
         centerStereo = try c.decodeIfPresent(Bool.self, forKey: .centerStereo) ?? defaults.centerStereo
         autoSwitch = try c.decodeIfPresent(Bool.self, forKey: .autoSwitch) ?? defaults.autoSwitch
         requiredMonitors = try c.decodeIfPresent(Int.self, forKey: .requiredMonitors) ?? defaults.requiredMonitors
+        leftTrim = try c.decodeIfPresent(Float.self, forKey: .leftTrim) ?? defaults.leftTrim
+        centerTrim = try c.decodeIfPresent(Float.self, forKey: .centerTrim) ?? defaults.centerTrim
+        rightTrim = try c.decodeIfPresent(Float.self, forKey: .rightTrim) ?? defaults.rightTrim
     }
 
     static var fileURL: URL {
@@ -73,13 +82,13 @@ struct RouterConfig: Codable {
     /// Unmapped channels (including BlackHole's own output pair) stay silent.
     func mixingMatrix() -> [Int: (l: Float, r: Float)] {
         var matrix: [Int: (l: Float, r: Float)] = [:]
-        for ch in [leftPair, leftPair + 1] { matrix[ch] = (l: 1.0, r: 0.0) }
-        for ch in [rightPair, rightPair + 1] { matrix[ch] = (l: 0.0, r: 1.0) }
+        for ch in [leftPair, leftPair + 1] { matrix[ch] = (l: leftTrim, r: 0.0) }
+        for ch in [rightPair, rightPair + 1] { matrix[ch] = (l: 0.0, r: rightTrim) }
         if centerStereo {
-            matrix[centerPair] = (l: 1.0, r: 0.0)
-            matrix[centerPair + 1] = (l: 0.0, r: 1.0)
+            matrix[centerPair] = (l: centerTrim, r: 0.0)
+            matrix[centerPair + 1] = (l: 0.0, r: centerTrim)
         } else {
-            for ch in [centerPair, centerPair + 1] { matrix[ch] = (l: 0.5, r: 0.5) }
+            for ch in [centerPair, centerPair + 1] { matrix[ch] = (l: 0.5 * centerTrim, r: 0.5 * centerTrim) }
         }
         return matrix
     }

@@ -11,6 +11,7 @@ USAGE:
   monitor-speakers test [pairStart]          Play a tone per channel pair (or one pair) to identify monitors
   monitor-speakers map <left> <center> <right>   Assign channel pairs to positions, e.g. map 2 4 6
   monitor-speakers gain <0.0-2.0>            Set master gain
+  monitor-speakers trim <left|center|right> <0.0-2.0>   Per-monitor gain trim
   monitor-speakers center <stereo|mono>      Center monitor plays own L/R or mono (L+R)/2
   monitor-speakers autoswitch <on|off>       Auto-switch default output on monitor connect/disconnect
   monitor-speakers run [--verbose]           Start routing (foreground; Ctrl-C to stop)
@@ -174,6 +175,26 @@ func commandGain(_ arg: String?) {
     do {
         try config.save()
         print("master gain set to \(gain) (restart `run` to apply)")
+    } catch {
+        fail("\(error)")
+    }
+}
+
+func commandTrim(_ args: [String]) {
+    guard args.count == 2, let value = Float(args[1]), value >= 0, value <= 2,
+          ["left", "center", "right"].contains(args[0])
+    else {
+        fail("usage: monitor-speakers trim <left|center|right> <0.0-2.0>")
+    }
+    var config = RouterConfig.load()
+    switch args[0] {
+    case "left": config.leftTrim = value
+    case "center": config.centerTrim = value
+    default: config.rightTrim = value
+    }
+    do {
+        try config.save()
+        print("\(args[0]) trim set to \(value) (restart `run` to apply)")
     } catch {
         fail("\(error)")
     }
@@ -382,6 +403,7 @@ case "teardown": commandTeardown()
 case "test": commandTest(pairArg: arguments.count > 1 ? arguments[1] : nil)
 case "map": commandMap(Array(arguments.dropFirst()))
 case "gain": commandGain(arguments.count > 1 ? arguments[1] : nil)
+case "trim": commandTrim(Array(arguments.dropFirst()))
 case "center": commandCenter(arguments.count > 1 ? arguments[1] : nil)
 case "autoswitch": commandAutoSwitch(arguments.count > 1 ? arguments[1] : nil)
 case "run": commandRun(verbose: arguments.contains("--verbose"))
