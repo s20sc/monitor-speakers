@@ -63,6 +63,10 @@ Optional:
 
 ```sh
 bin/monitor-speakers gain 0.8         # software master gain (0.0-2.0)
+bin/monitor-speakers trim right 0.8   # per-monitor gain trim
+bin/monitor-speakers sub off          # 2.1 bass management (see below)
+bin/monitor-speakers sub freq 150     # crossover frequency (40-300 Hz)
+bin/monitor-speakers sub trim 1.2     # bass speaker level (0.0-2.0)
 bin/monitor-speakers center mono      # center monitor: mono (L+R)/2 instead of own stereo
 bin/monitor-speakers autoswitch off   # disable automatic default-output switching
 bin/monitor-speakers install          # launchd agent: auto-start at login
@@ -92,6 +96,20 @@ bin/monitor-speakers teardown         # destroy the aggregate device
   (AirPods, etc.) is respected until the next connect/disconnect event.
 - **Switching back**: `bin/monitor-speakers default "<your speakers>"` returns
   the system to any other output device; the router can stay running idle.
+
+## 2.1 bass management
+
+Monitor speakers have no low end. If a better speaker sits on the desk (a
+speakerphone, a small monitor speaker — anything CoreAudio sees as an output
+device), `setup` adds it to the aggregate as a bass speaker: the router
+low-passes an (L+R)/2 mono bus into it and high-passes the monitors with the
+matching 4th-order Linkwitz-Riley crossover (flat sum, zero allocation on the
+audio thread). Configure the device name via `subName` in the config file
+(default "Insta360 Wave"); `sub freq` moves the crossover, `sub trim` sets the
+bass level. Prefer a wired (USB) connection — Bluetooth adds 100-300 ms and
+audibly smears the bass behind the satellites; `setup` warns in that case.
+Bass below ~120 Hz carries no directional cue, so stereo imaging stays on the
+monitors.
 
 ## Troubleshooting: no sound after re-docking
 

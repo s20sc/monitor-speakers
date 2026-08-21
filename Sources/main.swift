@@ -12,6 +12,7 @@ USAGE:
   monitor-speakers map <left> <center> <right>   Assign channel pairs to positions, e.g. map 2 4 6
   monitor-speakers gain <0.0-2.0>            Set master gain
   monitor-speakers trim <left|center|right> <0.0-2.0>   Per-monitor gain trim
+  monitor-speakers sub <on|off|freq 40-300|trim 0.0-2.0>   2.1 bass speaker (crossover)
   monitor-speakers center <stereo|mono>      Center monitor plays own L/R or mono (L+R)/2
   monitor-speakers autoswitch <on|off>       Auto-switch default output on monitor connect/disconnect
   monitor-speakers run [--verbose]           Start routing (foreground; Ctrl-C to stop)
@@ -48,7 +49,7 @@ func commandList() {
 }
 
 func commandSetup() {
-    let config = RouterConfig.load()
+    var config = RouterConfig.load()
 
     guard let blackhole = AudioDevices.find(nameContains: config.blackholeName)
         .first(where: { $0.inputChannels >= 2 })
@@ -70,10 +71,29 @@ func commandSetup() {
         print("removed existing aggregate '\(existing.name)'")
     }
 
+    // Optional bass speaker rides at the end of the aggregate.
+    var subSpeaker: AudioDeviceInfo?
+    if config.subEnabled {
+        // Prefer wired transports: Bluetooth adds 100-300 ms which audibly
+        // smears the bass behind the (near-zero-latency) satellites.
+        subSpeaker = AudioDevices.find(nameContains: config.subName)
+            .filter { $0.outputChannels >= 2 && $0.transport != "Aggregate" && $0.transport != "Virtual" }
+            .sorted { ($0.transport == "Bluetooth" ? 1 : 0) < ($1.transport == "Bluetooth" ? 1 : 0) }
+            .first
+        if subSpeaker == nil {
+            print("note: bass speaker '\(config.subName)' not found; continuing without it")
+        } else if subSpeaker?.transport == "Bluetooth" {
+            print("warning: '\(subSpeaker!.name)' is on Bluetooth — bass will lag by 100-300 ms;")
+            print("         connect it via USB and re-run `setup` for tight sync")
+        }
+    }
+    config.subPair = subSpeaker != nil ? 2 + monitors.count * 2 : -1
+
     // BlackHole first so its loopback occupies channels 0-1 and feeds input.
     // BlackHole is the clock master: its host-clock timing is the most stable,
     // and every monitor gets drift compensation against it.
     let subDeviceUIDs = [blackhole.uid] + monitors.map { $0.uid }
+        + (subSpeaker.map { [$0.uid] } ?? [])
     let aggregateID: AudioDeviceID
     do {
         aggregateID = try AudioDevices.createAggregate(
@@ -100,6 +120,9 @@ func commandSetup() {
     for monitor in monitors {
         print("  ch \(channel)-\(channel + 1)  \(monitor.name) [\(monitor.transport)]")
         channel += 2
+    }
+    if let subSpeaker {
+        print("  ch \(channel)-\(channel + 1)  \(subSpeaker.name) [\(subSpeaker.transport)] (bass < \(Int(config.subFreq)) Hz)")
     }
     print("\nnext: run `monitor-speakers test` to identify monitors,")
     print("then `monitor-speakers map <left> <center> <right>` if the default (2 4 6) is wrong.")
@@ -128,7 +151,11 @@ func commandTest(pairArg: String?) {
         guard let pair = Int(pairArg) else { fail("invalid channel pair '\(pairArg)'") }
         pairs = [pair]
     } else {
-        pairs = [config.leftPair, config.centerPair, config.rightPair].sorted()
+        var defaults = [config.leftPair, config.centerPair, config.rightPair]
+        if config.subActive(outputChannels: aggregate.outputChannels) {
+            defaults.append(config.subPair)
+        }
+        pairs = defaults.sorted()
     }
     for pair in pairs {
         print("playing tone on channel pair \(pair)-\(pair + 1) ...")
@@ -197,6 +224,39 @@ func commandTrim(_ args: [String]) {
         print("\(args[0]) trim set to \(value) (restart `run` to apply)")
     } catch {
         fail("\(error)")
+    }
+}
+
+func commandSub(_ args: [String]) {
+    var config = RouterConfig.load()
+    let usageText = "usage: monitor-speakers sub <on|off|freq 40-300|trim 0.0-2.0>"
+    switch args.first {
+    case "on", "off":
+        config.subEnabled = args[0] == "on"
+        do {
+            try config.save()
+            print("sub \(args[0]) — run `setup` to rebuild the aggregate, then restart `run`")
+        } catch { fail("\(error)") }
+    case "freq":
+        guard args.count == 2, let freq = Float(args[1]), freq >= 40, freq <= 300 else {
+            fail(usageText)
+        }
+        config.subFreq = freq
+        do {
+            try config.save()
+            print("crossover set to \(Int(freq)) Hz (restart `run` to apply)")
+        } catch { fail("\(error)") }
+    case "trim":
+        guard args.count == 2, let value = Float(args[1]), value >= 0, value <= 2 else {
+            fail(usageText)
+        }
+        config.subTrim = value
+        do {
+            try config.save()
+            print("sub trim set to \(value) (restart `run` to apply)")
+        } catch { fail("\(error)") }
+    default:
+        fail(usageText)
     }
 }
 
@@ -310,6 +370,7 @@ func commandStatus() {
     print("config: \(RouterConfig.fileURL.path)")
     print("  aggregate: \(config.aggregateName) (\(config.aggregateUID))")
     print("  mapping: left=\(config.leftPair) center=\(config.centerPair) (\(config.centerStereo ? "stereo" : "mono")) right=\(config.rightPair) gain=\(config.masterGain)")
+    print("  sub: \(config.subEnabled ? "on" : "off") '\(config.subName)' pair=\(config.subPair) crossover=\(Int(config.subFreq))Hz trim=\(config.subTrim)")
     let aggregate = findAggregate(config)
     print("aggregate device: \(aggregate.map { "present (id \($0.id), \($0.outputChannels) out ch)" } ?? "MISSING — run setup")")
     let blackhole = AudioDevices.find(nameContains: config.blackholeName)
@@ -404,6 +465,7 @@ case "test": commandTest(pairArg: arguments.count > 1 ? arguments[1] : nil)
 case "map": commandMap(Array(arguments.dropFirst()))
 case "gain": commandGain(arguments.count > 1 ? arguments[1] : nil)
 case "trim": commandTrim(Array(arguments.dropFirst()))
+case "sub": commandSub(Array(arguments.dropFirst()))
 case "center": commandCenter(arguments.count > 1 ? arguments[1] : nil)
 case "autoswitch": commandAutoSwitch(arguments.count > 1 ? arguments[1] : nil)
 case "run": commandRun(verbose: arguments.contains("--verbose"))

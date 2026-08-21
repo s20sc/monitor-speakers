@@ -37,7 +37,18 @@ private struct RenderContext {
     var channelCount: Int
     var leftGains: UnsafeMutablePointer<Float>   // per output channel
     var rightGains: UnsafeMutablePointer<Float>  // per output channel
+    var subGains: UnsafeMutablePointer<Float>    // per output channel, fed from the LP mono bus
     var peakBits: UnsafeMutablePointer<UInt32>   // inputPeak as Float bit pattern
+    /// 2.1 crossover. When false the satellites get the raw input and the LP
+    /// bus is never computed (sub absent -> monitors stay full-range).
+    var crossoverEnabled: Bool
+    var highPass: BiquadCoefficients
+    var lowPass: BiquadCoefficients
+    var scratchHL: UnsafeMutablePointer<Float>   // high-passed L, per frame
+    var scratchHR: UnsafeMutablePointer<Float>   // high-passed R, per frame
+    var scratchLP: UnsafeMutablePointer<Float>   // low-passed (L+R)/2, per frame
+    var scratchCapacity: Int
+    var filterState: UnsafeMutablePointer<Float> // 3 LR4 filters x 8 floats (HL, HR, LP)
 }
 
 /// Captures nothing → convertible to a C `AudioDeviceIOProc`. Copies the input
@@ -59,6 +70,34 @@ private let routerIOProc: AudioDeviceIOProc = {
     }
     ctx.peakBits.pointee = peak.bitPattern
 
+    // Run the crossover once per callback into the scratch buffers: satellites
+    // read the high-passed L/R, the sub channels read the low-passed mono bus.
+    let inputFrames = min(left.frames, ctx.scratchCapacity)
+    if ctx.crossoverEnabled {
+        let stateHL = ctx.filterState
+        let stateHR = ctx.filterState + 8
+        let stateLP = ctx.filterState + 16
+        for frame in 0..<inputFrames {
+            let l = left.base[frame * left.stride]
+            let r = right.base[frame * right.stride]
+            ctx.scratchHL[frame] = processLR4(l, coefficients: ctx.highPass, state: stateHL)
+            ctx.scratchHR[frame] = processLR4(r, coefficients: ctx.highPass, state: stateHR)
+            ctx.scratchLP[frame] = processLR4((l + r) * 0.5, coefficients: ctx.lowPass, state: stateLP)
+        }
+    }
+
+    let sourceL: UnsafeMutablePointer<Float32>
+    let sourceR: UnsafeMutablePointer<Float32>
+    let sourceStrideL: Int
+    let sourceStrideR: Int
+    if ctx.crossoverEnabled {
+        sourceL = ctx.scratchHL; sourceStrideL = 1
+        sourceR = ctx.scratchHR; sourceStrideR = 1
+    } else {
+        sourceL = left.base; sourceStrideL = left.stride
+        sourceR = right.base; sourceStrideR = right.stride
+    }
+
     let outputs = UnsafeMutableAudioBufferListPointer(outOutputData)
     var channel = 0
     for buffer in outputs {
@@ -70,15 +109,18 @@ private let routerIOProc: AudioDeviceIOProc = {
             let ch = channel + local
             let lg = ch < ctx.channelCount ? ctx.leftGains[ch] : 0
             let rg = ch < ctx.channelCount ? ctx.rightGains[ch] : 0
-            if lg == 0 && rg == 0 {
+            let sg = ctx.crossoverEnabled && ch < ctx.channelCount ? ctx.subGains[ch] : 0
+            if lg == 0 && rg == 0 && sg == 0 {
                 for frame in 0..<frames { base[frame * stride + local] = 0 }
                 continue
             }
-            let mixed = min(frames, left.frames)
+            let mixed = min(frames, inputFrames)
             for frame in 0..<mixed {
-                let l = left.base[frame * left.stride]
-                let r = right.base[frame * right.stride]
-                base[frame * stride + local] = (lg * l + rg * r) * ctx.gain
+                let l = sourceL[frame * sourceStrideL]
+                let r = sourceR[frame * sourceStrideR]
+                var v = lg * l + rg * r
+                if sg != 0 { v += sg * ctx.scratchLP[frame] }
+                base[frame * stride + local] = v * ctx.gain
             }
             for frame in mixed..<frames { base[frame * stride + local] = 0 }
         }
@@ -92,35 +134,65 @@ private let routerIOProc: AudioDeviceIOProc = {
 /// CoreAudio IOProc, so drift correction between sub-devices is handled by the
 /// HAL, not by us.
 final class Router {
+    /// Upper bound on frames per IO cycle we can filter; the HAL is asked for
+    /// 256 but other clients may push the device to larger buffers.
+    private static let scratchFrames = 16384
+
     private let deviceID: AudioDeviceID
     private let channelCount: Int
     private let leftGains: UnsafeMutablePointer<Float>
     private let rightGains: UnsafeMutablePointer<Float>
+    private let subGains: UnsafeMutablePointer<Float>
     private let peakBits: UnsafeMutablePointer<UInt32>
+    private let scratch: UnsafeMutablePointer<Float>      // 3 x scratchFrames
+    private let filterState: UnsafeMutablePointer<Float>  // 3 filters x 8 floats
     private let context: UnsafeMutablePointer<RenderContext>
     private var procID: AudioDeviceIOProcID?
 
     /// Peak of the most recent input block; diagnostic only.
     var inputPeak: Float { Float(bitPattern: peakBits.pointee) }
 
-    init(deviceID: AudioDeviceID, matrix: [Int: (l: Float, r: Float)], gain: Float, channelCount: Int) {
+    init(deviceID: AudioDeviceID, config: RouterConfig, channelCount: Int) {
         self.deviceID = deviceID
         self.channelCount = channelCount
         let capacity = max(1, channelCount)
         leftGains = .allocate(capacity: capacity)
         rightGains = .allocate(capacity: capacity)
+        subGains = .allocate(capacity: capacity)
         leftGains.initialize(repeating: 0, count: capacity)
         rightGains.initialize(repeating: 0, count: capacity)
-        for (ch, coefficient) in matrix where ch >= 0 && ch < channelCount {
+        subGains.initialize(repeating: 0, count: capacity)
+        for (ch, coefficient) in config.mixingMatrix() where ch >= 0 && ch < channelCount {
             leftGains[ch] = coefficient.l
             rightGains[ch] = coefficient.r
         }
+        let crossover = config.subActive(outputChannels: channelCount)
+        if crossover {
+            subGains[config.subPair] = config.subTrim
+            subGains[config.subPair + 1] = config.subTrim
+        }
         peakBits = .allocate(capacity: 1)
         peakBits.initialize(to: Float(0).bitPattern)
+        scratch = .allocate(capacity: Self.scratchFrames * 3)
+        scratch.initialize(repeating: 0, count: Self.scratchFrames * 3)
+        filterState = .allocate(capacity: 24)
+        filterState.initialize(repeating: 0, count: 24)
+        // The whole pipeline runs at 48 kHz (BlackHole + display audio); a
+        // different rate would only shift the crossover corner slightly.
+        let sampleRate: Float = 48000
         context = .allocate(capacity: 1)
         context.initialize(to: RenderContext(
-            gain: gain, channelCount: channelCount,
-            leftGains: leftGains, rightGains: rightGains, peakBits: peakBits
+            gain: config.masterGain, channelCount: channelCount,
+            leftGains: leftGains, rightGains: rightGains, subGains: subGains,
+            peakBits: peakBits,
+            crossoverEnabled: crossover,
+            highPass: .butterworthHighPass(frequency: config.subFreq, sampleRate: sampleRate),
+            lowPass: .butterworthLowPass(frequency: config.subFreq, sampleRate: sampleRate),
+            scratchHL: scratch,
+            scratchHR: scratch + Self.scratchFrames,
+            scratchLP: scratch + Self.scratchFrames * 2,
+            scratchCapacity: Self.scratchFrames,
+            filterState: filterState
         ))
     }
 
@@ -130,7 +202,10 @@ final class Router {
         context.deallocate()
         leftGains.deallocate()
         rightGains.deallocate()
+        subGains.deallocate()
         peakBits.deallocate()
+        scratch.deallocate()
+        filterState.deallocate()
     }
 
     func start() throws {
@@ -268,8 +343,7 @@ final class RouterSupervisor {
         try config.validateMapping(outputChannels: aggregate.outputChannels)
         let started = Router(
             deviceID: aggregate.id,
-            matrix: config.mixingMatrix(),
-            gain: config.masterGain,
+            config: config,
             channelCount: aggregate.outputChannels
         )
         try started.start()
@@ -277,7 +351,10 @@ final class RouterSupervisor {
         lastOutputChannels = aggregate.outputChannels
         lastDeviceID = aggregate.id
         let centerMode = config.centerStereo ? "stereo" : "mono"
-        log("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair), gain \(config.masterGain)")
+        let subMode = config.subActive(outputChannels: aggregate.outputChannels)
+            ? " sub→ch\(config.subPair)(<\(Int(config.subFreq))Hz, trim \(config.subTrim))"
+            : ""
+        log("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair)\(subMode), gain \(config.masterGain)")
     }
 
     private func scheduleReload() {

@@ -27,12 +27,21 @@ struct RouterConfig: Codable {
     var leftTrim: Float = 1.0
     var centerTrim: Float = 1.0
     var rightTrim: Float = 1.0
+    /// 2.1 bass management: content below subFreq goes to a separate speaker
+    /// (mono LR4 low-pass), monitors get the matching high-pass. `subPair` is
+    /// the sub's first channel in the aggregate, written by `setup` (-1 = none).
+    var subEnabled = true
+    var subName = "Insta360 Wave"
+    var subFreq: Float = 120
+    var subTrim: Float = 1.0
+    var subPair = -1
 
     enum CodingKeys: String, CodingKey {
         case aggregateName, aggregateUID, blackholeName, monitorNameFilter
         case masterGain, leftPair, centerPair, rightPair, centerStereo
         case autoSwitch, requiredMonitors
         case leftTrim, centerTrim, rightTrim
+        case subEnabled, subName, subFreq, subTrim, subPair
     }
 
     init() {}
@@ -54,6 +63,17 @@ struct RouterConfig: Codable {
         leftTrim = try c.decodeIfPresent(Float.self, forKey: .leftTrim) ?? defaults.leftTrim
         centerTrim = try c.decodeIfPresent(Float.self, forKey: .centerTrim) ?? defaults.centerTrim
         rightTrim = try c.decodeIfPresent(Float.self, forKey: .rightTrim) ?? defaults.rightTrim
+        subEnabled = try c.decodeIfPresent(Bool.self, forKey: .subEnabled) ?? defaults.subEnabled
+        subName = try c.decodeIfPresent(String.self, forKey: .subName) ?? defaults.subName
+        subFreq = try c.decodeIfPresent(Float.self, forKey: .subFreq) ?? defaults.subFreq
+        subTrim = try c.decodeIfPresent(Float.self, forKey: .subTrim) ?? defaults.subTrim
+        subPair = try c.decodeIfPresent(Int.self, forKey: .subPair) ?? defaults.subPair
+    }
+
+    /// The sub is active only when enabled, placed by setup, and its channels
+    /// actually exist in the current aggregate.
+    func subActive(outputChannels: Int) -> Bool {
+        subEnabled && subPair >= 2 && subPair + 1 < outputChannels
     }
 
     static var fileURL: URL {
