@@ -263,8 +263,18 @@ final class RouterSupervisor {
     /// uid -> "name [transport]" of monitors seen at the last device-list
     /// event; diffed on every event to log exactly which monitor flapped.
     private var knownMonitors: [String: String] = [:]
+    /// Last start failure; keeps the periodic retry loop quiet in the log
+    /// unless the error actually changes.
+    private var lastErrorText: String?
 
     var inputPeak: Float { router?.inputPeak ?? 0 }
+
+    /// Cross-thread read for UI display only; a slightly stale value is fine.
+    var statusText: String {
+        router != nil
+            ? "Routing · \(lastOutputChannels) ch"
+            : "Waiting for devices"
+    }
 
     init(config: RouterConfig) {
         self.config = config
@@ -284,7 +294,8 @@ final class RouterSupervisor {
         } catch {
             lastOutputChannels = -1
             lastDeviceID = 0
-            log("supervisor: IO not started yet (\(error)); waiting for device changes")
+            log("supervisor: IO not started yet (\(error)); retrying periodically")
+            scheduleRetry()
         }
         knownMonitors = Self.currentMonitors(config)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
@@ -355,6 +366,7 @@ final class RouterSupervisor {
             ? " sub→ch\(config.subPair)(<\(Int(config.subFreq))Hz, trim \(config.subTrim))"
             : ""
         log("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair)\(subMode), gain \(config.masterGain)")
+        lastErrorText = nil
     }
 
     private func scheduleReload() {
@@ -366,20 +378,38 @@ final class RouterSupervisor {
         queue.asyncAfter(deadline: .now() + 2.5, execute: work)
     }
 
+    /// Device-list changes are not the only way a failed start can become
+    /// startable again (e.g. a TCC microphone grant fires no event), so keep
+    /// retrying quietly in the background.
+    private func scheduleRetry() {
+        pending?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.reloadIfNeeded() }
+        pending = work
+        queue.asyncAfter(deadline: .now() + 10, execute: work)
+    }
+
     private func reloadIfNeeded() {
         guard let aggregate = AudioDevices.find(uid: config.aggregateUID) else { return }
         guard aggregate.outputChannels != lastOutputChannels || aggregate.id != lastDeviceID
         else { return }
-        log("supervisor: aggregate changed (\(lastOutputChannels)ch id \(lastDeviceID) → \(aggregate.outputChannels)ch id \(aggregate.id)), restarting IO")
+        // Quiet during retry loops: only narrate transitions, not every attempt.
+        if lastErrorText == nil {
+            log("supervisor: aggregate changed (\(lastOutputChannels)ch id \(lastDeviceID) → \(aggregate.outputChannels)ch id \(aggregate.id)), restarting IO")
+        }
         router?.stop()
         router = nil
         do {
             try startRouter()
         } catch {
-            // Reset so the next device-list event retries unconditionally.
+            // Reset so the next attempt retries unconditionally.
             lastOutputChannels = -1
             lastDeviceID = 0
-            log("supervisor: restart failed: \(error) — will retry on next device change")
+            let text = "\(error)"
+            if text != lastErrorText {
+                log("supervisor: restart failed: \(text) — retrying periodically")
+                lastErrorText = text
+            }
+            scheduleRetry()
         }
     }
 }
