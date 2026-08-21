@@ -50,79 +50,10 @@ func commandList() {
 
 func commandSetup() {
     var config = RouterConfig.load()
-
-    guard let blackhole = AudioDevices.find(nameContains: config.blackholeName)
-        .first(where: { $0.inputChannels >= 2 })
-    else {
-        fail("BlackHole device '\(config.blackholeName)' not found — install from https://existential.audio/blackhole/")
-    }
-
-    let monitors = AudioDevices.find(nameContains: config.monitorNameFilter)
-        .filter { $0.outputChannels >= 2 && $0.transport != "Aggregate" && $0.uid != blackhole.uid }
-    guard !monitors.isEmpty else {
-        fail("no output devices matching '\(config.monitorNameFilter)' found — are the monitors connected?")
-    }
-    if monitors.count != 3 {
-        print("warning: expected 3 monitors, found \(monitors.count); proceeding with all of them")
-    }
-
-    if let existing = findAggregate(config) {
-        try? AudioDevices.destroyAggregate(deviceID: existing.id)
-        print("removed existing aggregate '\(existing.name)'")
-    }
-
-    // Optional bass speaker rides at the end of the aggregate.
-    var subSpeaker: AudioDeviceInfo?
-    if config.subEnabled {
-        // Prefer wired transports: Bluetooth adds 100-300 ms which audibly
-        // smears the bass behind the (near-zero-latency) satellites.
-        subSpeaker = AudioDevices.find(nameContains: config.subName)
-            .filter { $0.outputChannels >= 2 && $0.transport != "Aggregate" && $0.transport != "Virtual" }
-            .sorted { ($0.transport == "Bluetooth" ? 1 : 0) < ($1.transport == "Bluetooth" ? 1 : 0) }
-            .first
-        if subSpeaker == nil {
-            print("note: bass speaker '\(config.subName)' not found; continuing without it")
-        } else if subSpeaker?.transport == "Bluetooth" {
-            print("warning: '\(subSpeaker!.name)' is on Bluetooth — bass will lag by 100-300 ms;")
-            print("         connect it via USB and re-run `setup` for tight sync")
-        }
-    }
-    config.subPair = subSpeaker != nil ? 2 + monitors.count * 2 : -1
-
-    // BlackHole first so its loopback occupies channels 0-1 and feeds input.
-    // BlackHole is the clock master: its host-clock timing is the most stable,
-    // and every monitor gets drift compensation against it.
-    let subDeviceUIDs = [blackhole.uid] + monitors.map { $0.uid }
-        + (subSpeaker.map { [$0.uid] } ?? [])
-    let aggregateID: AudioDeviceID
     do {
-        aggregateID = try AudioDevices.createAggregate(
-            name: config.aggregateName,
-            uid: config.aggregateUID,
-            subDeviceUIDs: subDeviceUIDs,
-            masterUID: blackhole.uid
-        )
+        for line in try setupAggregate(config: &config) { print(line) }
     } catch {
         fail("\(error)")
-    }
-    // Roll back the just-created aggregate if any follow-up step fails, so setup
-    // never leaves an orphan device behind after reporting failure.
-    do {
-        try config.save()
-    } catch {
-        try? AudioDevices.destroyAggregate(deviceID: aggregateID)
-        fail("failed to save config after creating aggregate (rolled back): \(error)")
-    }
-    print("created aggregate '\(config.aggregateName)' (id \(aggregateID))")
-    print("\nchannel layout:")
-    print("  ch 0-1  \(blackhole.name) [loopback input, output muted]")
-    var channel = 2
-    for monitor in monitors {
-        print("  ch \(channel)-\(channel + 1)  \(monitor.name) [\(monitor.transport)]")
-        channel += 2
-    }
-    if let subSpeaker {
-        print("  ch \(channel)-\(channel + 1)  \(subSpeaker.name) [\(subSpeaker.transport)] (bass < \(Int(config.subFreq)) Hz)")
     }
     print("\nnext: run `monitor-speakers test` to identify monitors,")
     print("then `monitor-speakers map <left> <center> <right>` if the default (2 4 6) is wrong.")
@@ -457,6 +388,13 @@ func commandUninstall() {
 setvbuf(stdout, nil, _IOLBF, 0)  // line-buffer stdout so logs reach files/launchd promptly
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+
+// Launched from the .app bundle (Launch Services passes no arguments):
+// become the menu bar app instead of printing CLI usage.
+if arguments.isEmpty, Bundle.main.bundleIdentifier == "com.monitor-speakers.app" {
+    runMenuBarApp()
+}
+
 switch arguments.first {
 case "list": commandList()
 case "setup": commandSetup()
@@ -466,6 +404,7 @@ case "map": commandMap(Array(arguments.dropFirst()))
 case "gain": commandGain(arguments.count > 1 ? arguments[1] : nil)
 case "trim": commandTrim(Array(arguments.dropFirst()))
 case "sub": commandSub(Array(arguments.dropFirst()))
+case "menubar": runMenuBarApp()
 case "center": commandCenter(arguments.count > 1 ? arguments[1] : nil)
 case "autoswitch": commandAutoSwitch(arguments.count > 1 ? arguments[1] : nil)
 case "run": commandRun(verbose: arguments.contains("--verbose"))
