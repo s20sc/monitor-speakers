@@ -97,6 +97,20 @@ bin/monitor-speakers teardown         # destroy the aggregate device
 - **Switching back**: `bin/monitor-speakers default "<your speakers>"` returns
   the system to any other output device; the router can stay running idle.
 
+## Menu bar app
+
+`make app` builds `bin/Monitor Speakers.app` — a menu-bar front-end that runs
+the router in-process (replacing the launchd agent; uninstall the agent first
+to avoid double routing). The status-item menu exposes crossover frequency,
+bass level, bass on/off, center-monitor mode, output auto-switch, a
+"Rebuild Aggregate" action for after re-cabling, and Launch at Login
+(ServiceManagement). Copy it to `/Applications` and grant the microphone
+prompt once — the bundle carries a proper usage description, and the CLI keeps
+working against the same config file. The app is ad-hoc signed, so each
+rebuilt binary triggers one new microphone prompt; the engine starts off the
+main thread and retries quietly, so the icon appears immediately and routing
+resumes the moment permission is granted.
+
 ## 2.1 bass management
 
 Monitor speakers have no low end. If a better speaker sits on the desk (a

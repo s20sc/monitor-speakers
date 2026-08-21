@@ -82,6 +82,16 @@ bin/monitor-speakers teardown         # 销毁聚合设备
 - **切回**：`bin/monitor-speakers default "<你的扬声器>"` 把系统切回任意其他输出设备，
   router 可以继续挂着空跑。
 
+## 菜单栏 App
+
+`make app` 会构建 `bin/Monitor Speakers.app`——菜单栏前端，router 在 app 进程内运行
+（取代 launchd agent；先卸载 agent 避免双路由）。菜单里可以调：分频点、低音音量、低音
+开关、中间屏模式、输出自动切换、换线后的「Rebuild Aggregate」、以及开机自启
+（ServiceManagement）。拷到 `/Applications`，麦克风授权一次即可——bundle 带了正式的
+用途说明，CLI 与 app 共用同一份配置文件。App 为 ad-hoc 签名，每次重新构建的二进制会
+触发一次新的麦克风授权；引擎在主线程之外启动并静默重试，所以图标秒出，授权通过的瞬间
+路由自动恢复。
+
 ## 2.1 低音管理
 
 显示器喇叭没有低频。如果桌上有一只更好的扬声器（会议音箱、小监听音箱——任何 CoreAudio
