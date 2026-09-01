@@ -49,6 +49,14 @@ private struct RenderContext {
     var scratchLP: UnsafeMutablePointer<Float>   // low-passed (L+R)/2, per frame
     var scratchCapacity: Int
     var filterState: UnsafeMutablePointer<Float> // 3 LR4 filters x 8 floats (HL, HR, LP)
+    /// Inaudible keep-alive pilot mixed into the sub channels: USB speakers
+    /// (Jieli boards and friends) power themselves off after a stretch of
+    /// digital silence, which is exactly what the LP bus carries whenever the
+    /// music has no low end. ~-60 dBFS at 20 Hz defeats the silence detector
+    /// without being audible.
+    var pilotStep: Double
+    var pilotAmp: Float
+    var pilotPhase: UnsafeMutablePointer<Double>
 }
 
 /// Captures nothing → convertible to a C `AudioDeviceIOProc`. Copies the input
@@ -77,13 +85,18 @@ private let routerIOProc: AudioDeviceIOProc = {
         let stateHL = ctx.filterState
         let stateHR = ctx.filterState + 8
         let stateLP = ctx.filterState + 16
+        var phase = ctx.pilotPhase.pointee
         for frame in 0..<inputFrames {
             let l = left.base[frame * left.stride]
             let r = right.base[frame * right.stride]
             ctx.scratchHL[frame] = processLR4(l, coefficients: ctx.highPass, state: stateHL)
             ctx.scratchHR[frame] = processLR4(r, coefficients: ctx.highPass, state: stateHR)
-            ctx.scratchLP[frame] = processLR4((l + r) * 0.5, coefficients: ctx.lowPass, state: stateLP)
+            let lp = processLR4((l + r) * 0.5, coefficients: ctx.lowPass, state: stateLP)
+            ctx.scratchLP[frame] = lp + ctx.pilotAmp * Float(sin(phase))
+            phase += ctx.pilotStep
+            if phase > 2.0 * .pi { phase -= 2.0 * .pi }
         }
+        ctx.pilotPhase.pointee = phase
     }
 
     let sourceL: UnsafeMutablePointer<Float32>
@@ -146,6 +159,7 @@ final class Router {
     private let peakBits: UnsafeMutablePointer<UInt32>
     private let scratch: UnsafeMutablePointer<Float>      // 3 x scratchFrames
     private let filterState: UnsafeMutablePointer<Float>  // 3 filters x 8 floats
+    private let pilotPhase: UnsafeMutablePointer<Double>
     private let context: UnsafeMutablePointer<RenderContext>
     private var procID: AudioDeviceIOProcID?
 
@@ -177,6 +191,8 @@ final class Router {
         scratch.initialize(repeating: 0, count: Self.scratchFrames * 3)
         filterState = .allocate(capacity: 24)
         filterState.initialize(repeating: 0, count: 24)
+        pilotPhase = .allocate(capacity: 1)
+        pilotPhase.initialize(to: 0)
         // The whole pipeline runs at 48 kHz (BlackHole + display audio); a
         // different rate would only shift the crossover corner slightly.
         let sampleRate: Float = 48000
@@ -192,7 +208,10 @@ final class Router {
             scratchHR: scratch + Self.scratchFrames,
             scratchLP: scratch + Self.scratchFrames * 2,
             scratchCapacity: Self.scratchFrames,
-            filterState: filterState
+            filterState: filterState,
+            pilotStep: 2.0 * .pi * 20.0 / Double(sampleRate),
+            pilotAmp: 0.001,  // ≈ -60 dBFS before sub trim
+            pilotPhase: pilotPhase
         ))
     }
 
@@ -206,6 +225,7 @@ final class Router {
         peakBits.deallocate()
         scratch.deallocate()
         filterState.deallocate()
+        pilotPhase.deallocate()
     }
 
     func start() throws {
@@ -247,7 +267,9 @@ final class Router {
 /// aggregate's output channel count or AudioDeviceID changes (the latter also
 /// covers coreaudiod restarts, which renumber every device).
 final class RouterSupervisor {
-    private let config: RouterConfig
+    /// Mutable: an automatic aggregate rebuild (bass speaker reappearing)
+    /// updates `subPair` in place.
+    private var config: RouterConfig
     private let queue = DispatchQueue(label: "monitor-speakers.supervisor")
     private var router: Router?
     private var pending: DispatchWorkItem?
@@ -389,6 +411,20 @@ final class RouterSupervisor {
     }
 
     private func reloadIfNeeded() {
+        // The bass speaker powers itself off when idle; if a rebuild happened
+        // while it was gone, the aggregate no longer references it and it will
+        // not rejoin on its own. Rebuild automatically the moment it is back.
+        if config.subEnabled, config.subPair < 0,
+           AudioDevices.find(nameContains: config.subName).contains(where: {
+               $0.outputChannels >= 2 && $0.transport != "Aggregate" && $0.transport != "Virtual"
+           }) {
+            log("supervisor: bass speaker '\(config.subName)' is back — rebuilding aggregate")
+            do {
+                for line in try setupAggregate(config: &config) { log("supervisor: \(line)") }
+            } catch {
+                log("supervisor: automatic rebuild failed: \(error)")
+            }
+        }
         guard let aggregate = AudioDevices.find(uid: config.aggregateUID) else { return }
         guard aggregate.outputChannels != lastOutputChannels || aggregate.id != lastDeviceID
         else { return }
