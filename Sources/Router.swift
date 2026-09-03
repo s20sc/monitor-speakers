@@ -87,8 +87,13 @@ private let routerIOProc: AudioDeviceIOProc = {
         let stateLP = ctx.filterState + 16
         var phase = ctx.pilotPhase.pointee
         for frame in 0..<inputFrames {
-            let l = left.base[frame * left.stride]
-            let r = right.base[frame * right.stride]
+            // Sanitize: VoIP stacks occasionally emit NaN/Inf samples, and one
+            // of those permanently poisons IIR filter state — audio then dies
+            // until the next IO restart. Zero them at the door.
+            var l = left.base[frame * left.stride]
+            var r = right.base[frame * right.stride]
+            if !l.isFinite { l = 0 }
+            if !r.isFinite { r = 0 }
             ctx.scratchHL[frame] = processLR4(l, coefficients: ctx.highPass, state: stateHL)
             ctx.scratchHR[frame] = processLR4(r, coefficients: ctx.highPass, state: stateHR)
             let lp = processLR4((l + r) * 0.5, coefficients: ctx.lowPass, state: stateLP)
@@ -97,6 +102,13 @@ private let routerIOProc: AudioDeviceIOProc = {
             if phase > 2.0 * .pi { phase -= 2.0 * .pi }
         }
         ctx.pilotPhase.pointee = phase
+        // Self-heal: if state was already poisoned (e.g. before this guard
+        // existed, or by any residual non-finite arithmetic), flush it so the
+        // next callback recovers instead of staying silent forever.
+        for i in 0..<24 where !ctx.filterState[i].isFinite {
+            for j in 0..<24 { ctx.filterState[j] = 0 }
+            break
+        }
     }
 
     let sourceL: UnsafeMutablePointer<Float32>
