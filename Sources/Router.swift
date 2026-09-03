@@ -401,6 +401,10 @@ final class RouterSupervisor {
             : ""
         log("routing on '\(aggregate.name)': L→ch\(config.leftPair) C→ch\(config.centerPair)(\(centerMode)) R→ch\(config.rightPair)\(subMode), gain \(config.masterGain)")
         lastErrorText = nil
+        // A rebuilt aggregate can come up before all sub-devices have
+        // attached, and channels appearing inside it fire no system
+        // device-list event — re-check once after things settle.
+        queue.asyncAfter(deadline: .now() + 3) { [weak self] in self?.reloadIfNeeded() }
     }
 
     private func scheduleReload() {
